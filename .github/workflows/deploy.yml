@@ -35,20 +35,30 @@ jobs:
       - name: Package Lambda function
         run: |
           echo "Current directory: $(pwd)"
+          echo "=== Directory contents ==="
           ls -la
           
-          # Install dependencies
+          echo "=== Installing dependencies ==="
           npm install --production
           
-          # Create zip package (exclude unnecessary files)
-          zip -r lambda-package.zip . \
-            -x "*.git*" \
-            -x "node_modules/.cache/*" \
-            -x ".github/*" \
-            -x "cloudformation/*" \
-            -x "docs/*"
+          echo "=== Checking node_modules ==="
+          ls -la node_modules/ | head -20
+          
+          echo "=== Creating deployment package ==="
+          # Create zip with Lambda code and dependencies
+          zip -r lambda-package.zip \
+            index.js \
+            package.json \
+            package-lock.json \
+            controllers/ \
+            models/ \
+            routes/ \
+            services/ \
+            node_modules/
           
           echo "✅ Lambda package created"
+          echo "=== Package contents ==="
+          unzip -l lambda-package.zip | head -30
           ls -lh lambda-package.zip
 
       - name: Upload Lambda package to S3
