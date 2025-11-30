@@ -1,0 +1,439 @@
+name: Deploy Lambda Zapier Demo to AWS
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'lamda-zapier-demo/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-1
+  LAMBDA_FUNCTION_NAME: sqs-unified-handler
+  MAIN_QUEUE_NAME: message-processing-queue
+  DLQ_NAME: message-processing-dlq
+  EXECUTIONS_TABLE: sqs-executions
+  LOGS_TABLE: sqs-logs
+  IAM_ROLE_NAME: SQSProcessingLambdaRole
+  API_NAME: Pokemon-Unified-API
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Create DLQ
+        id: create-dlq
+        run: |
+          DLQ_URL=$(aws sqs get-queue-url --queue-name ${{ env.DLQ_NAME }} --query 'QueueUrl' --output text 2>/dev/null || echo "")
+          
+          if [ -z "$DLQ_URL" ]; then
+            echo "Creating DLQ..."
+            DLQ_URL=$(aws sqs create-queue \
+              --queue-name ${{ env.DLQ_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --query 'QueueUrl' \
+              --output text)
+          fi
+          
+          echo "dlq_url=$DLQ_URL" >> $GITHUB_OUTPUT
+          echo "✅ DLQ URL: $DLQ_URL"
+
+      - name: Create Main Queue
+        id: create-queue
+        run: |
+          QUEUE_URL=$(aws sqs get-queue-url --queue-name ${{ env.MAIN_QUEUE_NAME }} --query 'QueueUrl' --output text 2>/dev/null || echo "")
+          
+          if [ -z "$QUEUE_URL" ]; then
+            echo "Creating main queue..."
+            
+            DLQ_ARN=$(aws sqs get-queue-attributes \
+              --queue-url ${{ steps.create-dlq.outputs.dlq_url }} \
+              --attribute-names QueueArn \
+              --query 'Attributes.QueueArn' \
+              --output text)
+            
+            REDRIVE_POLICY="{\"deadLetterTargetArn\":\"${DLQ_ARN}\",\"maxReceiveCount\":\"3\"}"
+            
+            QUEUE_URL=$(aws sqs create-queue \
+              --queue-name ${{ env.MAIN_QUEUE_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --attributes VisibilityTimeout=30,MessageRetentionPeriod=345600,RedrivePolicy="$REDRIVE_POLICY" \
+              --query 'QueueUrl' \
+              --output text)
+          fi
+          
+          QUEUE_ARN=$(aws sqs get-queue-attributes \
+            --queue-url $QUEUE_URL \
+            --attribute-names QueueArn \
+            --query 'Attributes.QueueArn' \
+            --output text)
+          
+          echo "queue_url=$QUEUE_URL" >> $GITHUB_OUTPUT
+          echo "queue_arn=$QUEUE_ARN" >> $GITHUB_OUTPUT
+          echo "✅ Queue URL: $QUEUE_URL"
+
+      - name: Create Executions Table
+        run: |
+          TABLE_EXISTS=$(aws dynamodb describe-table --table-name ${{ env.EXECUTIONS_TABLE }} 2>/dev/null || echo "")
+          
+          if [ -z "$TABLE_EXISTS" ]; then
+            echo "Creating executions table..."
+            aws dynamodb create-table \
+              --table-name ${{ env.EXECUTIONS_TABLE }} \
+              --attribute-definitions \
+                AttributeName=PK,AttributeType=S \
+                AttributeName=SK,AttributeType=S \
+                AttributeName=GSI1PK,AttributeType=S \
+                AttributeName=GSI1SK,AttributeType=S \
+              --key-schema \
+                AttributeName=PK,KeyType=HASH \
+                AttributeName=SK,KeyType=RANGE \
+              --global-secondary-indexes \
+                "[{\"IndexName\":\"GSI1\",\"KeySchema\":[{\"AttributeName\":\"GSI1PK\",\"KeyType\":\"HASH\"},{\"AttributeName\":\"GSI1SK\",\"KeyType\":\"RANGE\"}],\"Projection\":{\"ProjectionType\":\"ALL\"},\"ProvisionedThroughput\":{\"ReadCapacityUnits\":5,\"WriteCapacityUnits\":5}}]" \
+              --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+              --region ${{ env.AWS_REGION }}
+            
+            echo "Waiting for table to be active..."
+            aws dynamodb wait table-exists --table-name ${{ env.EXECUTIONS_TABLE }}
+          fi
+          
+          echo "✅ Executions table ready"
+
+      - name: Create Logs Table
+        run: |
+          TABLE_EXISTS=$(aws dynamodb describe-table --table-name ${{ env.LOGS_TABLE }} 2>/dev/null || echo "")
+          
+          if [ -z "$TABLE_EXISTS" ]; then
+            echo "Creating logs table..."
+            aws dynamodb create-table \
+              --table-name ${{ env.LOGS_TABLE }} \
+              --attribute-definitions \
+                AttributeName=PK,AttributeType=S \
+                AttributeName=SK,AttributeType=S \
+              --key-schema \
+                AttributeName=PK,KeyType=HASH \
+                AttributeName=SK,KeyType=RANGE \
+              --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+              --region ${{ env.AWS_REGION }}
+            
+            echo "Waiting for table to be active..."
+            aws dynamodb wait table-exists --table-name ${{ env.LOGS_TABLE }}
+            
+            echo "Enabling TTL..."
+            aws dynamodb update-time-to-live \
+              --table-name ${{ env.LOGS_TABLE }} \
+              --time-to-live-specification Enabled=true,AttributeName=ttl
+          fi
+          
+          echo "✅ Logs table ready"
+
+      - name: Create IAM Role
+        id: create-role
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${{ env.IAM_ROLE_NAME }}"
+          
+          ROLE_EXISTS=$(aws iam get-role --role-name ${{ env.IAM_ROLE_NAME }} 2>/dev/null || echo "")
+          
+          if [ -z "$ROLE_EXISTS" ]; then
+            echo "Creating IAM role..."
+            
+            TRUST_POLICY=$(cat <<EOF
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": {"Service": "lambda.amazonaws.com"},
+              "Action": "sts:AssumeRole"
+            }]
+          }
+          EOF
+          )
+            
+            aws iam create-role \
+              --role-name ${{ env.IAM_ROLE_NAME }} \
+              --assume-role-policy-document "$TRUST_POLICY"
+            
+            aws iam attach-role-policy \
+              --role-name ${{ env.IAM_ROLE_NAME }} \
+              --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+            
+            aws iam attach-role-policy \
+              --role-name ${{ env.IAM_ROLE_NAME }} \
+              --policy-arn arn:aws:iam::aws:policy/AmazonSQSFullAccess
+            
+            aws iam attach-role-policy \
+              --role-name ${{ env.IAM_ROLE_NAME }} \
+              --policy-arn arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+            
+            echo "Waiting for role propagation..."
+            sleep 10
+          fi
+          
+          echo "role_arn=$ROLE_ARN" >> $GITHUB_OUTPUT
+          echo "✅ IAM role ready"
+
+      - name: Package Lambda function
+        run: |
+          cd lamda-zapier-demo
+          npm install --production
+          zip -r ../lambda-package.zip .
+          cd ..
+          echo "✅ Lambda package created"
+
+      - name: Deploy Lambda function
+        id: deploy-lambda
+        run: |
+          FUNCTION_EXISTS=$(aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} 2>/dev/null || echo "")
+          
+          if [ -z "$FUNCTION_EXISTS" ]; then
+            echo "Creating Lambda function..."
+            aws lambda create-function \
+              --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+              --runtime nodejs20.x \
+              --role ${{ steps.create-role.outputs.role_arn }} \
+              --handler index.handler \
+              --zip-file fileb://lambda-package.zip \
+              --timeout 60 \
+              --memory-size 256 \
+              --environment Variables="{QUEUE_URL=${{ steps.create-queue.outputs.queue_url }},DLQ_URL=${{ steps.create-dlq.outputs.dlq_url }},EXECUTIONS_TABLE=${{ env.EXECUTIONS_TABLE }},LOGS_TABLE=${{ env.LOGS_TABLE }},AWS_REGION=${{ env.AWS_REGION }}}" \
+              --region ${{ env.AWS_REGION }}
+          else
+            echo "Updating Lambda function..."
+            aws lambda update-function-code \
+              --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+              --zip-file fileb://lambda-package.zip \
+              --region ${{ env.AWS_REGION }}
+            
+            aws lambda update-function-configuration \
+              --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+              --timeout 60 \
+              --memory-size 256 \
+              --environment Variables="{QUEUE_URL=${{ steps.create-queue.outputs.queue_url }},DLQ_URL=${{ steps.create-dlq.outputs.dlq_url }},EXECUTIONS_TABLE=${{ env.EXECUTIONS_TABLE }},LOGS_TABLE=${{ env.LOGS_TABLE }},AWS_REGION=${{ env.AWS_REGION }}}" \
+              --region ${{ env.AWS_REGION }}
+          fi
+          
+          echo "Waiting for Lambda to be ready..."
+          aws lambda wait function-updated --function-name ${{ env.LAMBDA_FUNCTION_NAME }}
+          
+          LAMBDA_ARN=$(aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --query 'Configuration.FunctionArn' --output text)
+          echo "lambda_arn=$LAMBDA_ARN" >> $GITHUB_OUTPUT
+          echo "✅ Lambda function deployed"
+
+      - name: Configure SQS Trigger
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          
+          # Delete existing event source mapping if exists
+          EXISTING_UUID=$(aws lambda list-event-source-mappings \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "EventSourceMappings[0].UUID" \
+            --output text 2>/dev/null)
+          
+          if [ "$EXISTING_UUID" != "None" ] && [ ! -z "$EXISTING_UUID" ]; then
+            aws lambda delete-event-source-mapping --uuid $EXISTING_UUID --region ${{ env.AWS_REGION }} || true
+            sleep 3
+          fi
+          
+          # Create new event source mapping
+          aws lambda create-event-source-mapping \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --event-source-arn ${{ steps.create-queue.outputs.queue_arn }} \
+            --batch-size 10 \
+            --region ${{ env.AWS_REGION }} || true
+          
+          echo "✅ SQS trigger configured"
+
+      - name: Create API Gateway
+        id: create-api
+        run: |
+          API_ID=$(aws apigateway get-rest-apis \
+            --region ${{ env.AWS_REGION }} \
+            --query "items[?name=='${{ env.API_NAME }}'].id" \
+            --output text)
+          
+          if [ -z "$API_ID" ]; then
+            echo "Creating API Gateway..."
+            API_ID=$(aws apigateway create-rest-api \
+              --name ${{ env.API_NAME }} \
+              --description "Unified Pokemon API with producer/consumer/replay endpoints" \
+              --endpoint-configuration types=REGIONAL \
+              --region ${{ env.AWS_REGION }} \
+              --query 'id' \
+              --output text)
+          fi
+          
+          echo "api_id=$API_ID" >> $GITHUB_OUTPUT
+          echo "✅ API Gateway: $API_ID"
+
+      - name: Configure API Gateway Resources
+        run: |
+          API_ID=${{ steps.create-api.outputs.api_id }}
+          LAMBDA_ARN=${{ steps.deploy-lambda.outputs.lambda_arn }}
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          
+          ROOT_ID=$(aws apigateway get-resources --rest-api-id $API_ID --region ${{ env.AWS_REGION }} --query 'items[0].id' --output text)
+          
+          # Function to create endpoint
+          create_endpoint() {
+            local ENDPOINT_NAME=$1
+            
+            # Check if resource exists
+            RESOURCE_ID=$(aws apigateway get-resources \
+              --rest-api-id $API_ID \
+              --region ${{ env.AWS_REGION }} \
+              --query "items[?path=='/${ENDPOINT_NAME}'].id" \
+              --output text)
+            
+            if [ -z "$RESOURCE_ID" ]; then
+              RESOURCE_ID=$(aws apigateway create-resource \
+                --rest-api-id $API_ID \
+                --parent-id $ROOT_ID \
+                --path-part $ENDPOINT_NAME \
+                --region ${{ env.AWS_REGION }} \
+                --query 'id' \
+                --output text)
+            fi
+            
+            # Create POST method
+            aws apigateway put-method \
+              --rest-api-id $API_ID \
+              --resource-id $RESOURCE_ID \
+              --http-method POST \
+              --authorization-type NONE \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            
+            # Configure Lambda integration
+            aws apigateway put-integration \
+              --rest-api-id $API_ID \
+              --resource-id $RESOURCE_ID \
+              --http-method POST \
+              --type AWS_PROXY \
+              --integration-http-method POST \
+              --uri "arn:aws:apigateway:${{ env.AWS_REGION }}:lambda:path/2015-03-31/functions/${LAMBDA_ARN}/invocations" \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            
+            echo "✅ Created endpoint: /${ENDPOINT_NAME}"
+          }
+          
+          create_endpoint "producer"
+          create_endpoint "consumer"
+          create_endpoint "replay"
+
+      - name: Add Lambda Permissions for API Gateway
+        run: |
+          API_ID=${{ steps.create-api.outputs.api_id }}
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          
+          aws lambda add-permission \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --statement-id apigateway-unified-invoke \
+            --action lambda:InvokeFunction \
+            --principal apigateway.amazonaws.com \
+            --source-arn "arn:aws:execute-api:${{ env.AWS_REGION }}:${ACCOUNT_ID}:${API_ID}/*/*" \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || true
+          
+          echo "✅ Lambda permissions added"
+
+      - name: Deploy API Gateway
+        run: |
+          API_ID=${{ steps.create-api.outputs.api_id }}
+          
+          aws apigateway create-deployment \
+            --rest-api-id $API_ID \
+            --stage-name prod \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || true
+          
+          BASE_URL="https://${API_ID}.execute-api.${{ env.AWS_REGION }}.amazonaws.com/prod"
+          
+          echo "✅ API deployed successfully!"
+          echo ""
+          echo "=========================================="
+          echo "🎉 DEPLOYMENT COMPLETE!"
+          echo "=========================================="
+          echo ""
+          echo "📍 API Endpoints:"
+          echo "   Producer: ${BASE_URL}/producer"
+          echo "   Consumer: ${BASE_URL}/consumer"
+          echo "   Replay:   ${BASE_URL}/replay"
+          echo ""
+          echo "🧪 Test Command:"
+          echo "curl -X POST ${BASE_URL}/producer \\"
+          echo "  -H 'Content-Type: application/json' \\"
+          echo "  -d '{\"action\": \"get-pokemon\", \"pokemon\": \"pikachu\"}'"
+          echo ""
+          echo "=========================================="
+          
+          echo "BASE_URL=${BASE_URL}" >> $GITHUB_ENV
+
+      - name: Create deployment summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 🚀 Deployment Successful!
+          
+          ## 📍 API Endpoints
+          
+          - **Producer**: \`${{ env.BASE_URL }}/producer\`
+          - **Consumer**: \`${{ env.BASE_URL }}/consumer\`
+          - **Replay**: \`${{ env.BASE_URL }}/replay\`
+          
+          ## 🧪 Test Commands
+          
+          \`\`\`bash
+          # Queue a Pokemon request
+          curl -X POST ${{ env.BASE_URL }}/producer \\
+            -H 'Content-Type: application/json' \\
+            -d '{"action": "get-pokemon", "pokemon": "pikachu"}'
+          
+          # Check execution status
+          curl -X POST ${{ env.BASE_URL }}/producer \\
+            -H 'Content-Type: application/json' \\
+            -d '{"action": "get-status", "execution_id": "exec_xxx"}'
+          
+          # Manually process execution
+          curl -X POST ${{ env.BASE_URL }}/consumer \\
+            -H 'Content-Type: application/json' \\
+            -d '{"execution_id": "exec_xxx"}'
+          
+          # Replay failed executions
+          curl -X POST ${{ env.BASE_URL }}/replay \\
+            -H 'Content-Type: application/json' \\
+            -d '{}'
+          \`\`\`
+          
+          ## 📊 AWS Resources Created
+          
+          - ✅ SQS Queue: \`${{ env.MAIN_QUEUE_NAME }}\`
+          - ✅ SQS DLQ: \`${{ env.DLQ_NAME }}\`
+          - ✅ DynamoDB Table: \`${{ env.EXECUTIONS_TABLE }}\`
+          - ✅ DynamoDB Table: \`${{ env.LOGS_TABLE }}\`
+          - ✅ Lambda Function: \`${{ env.LAMBDA_FUNCTION_NAME }}\`
+          - ✅ IAM Role: \`${{ env.IAM_ROLE_NAME }}\`
+          - ✅ API Gateway: \`${{ env.API_NAME }}\`
+          
+          ## 🔍 Monitor
+          
+          - [CloudWatch Logs](https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#logsV2:log-groups/log-group/$252Faws$252Flambda$252F${{ env.LAMBDA_FUNCTION_NAME }})
+          - [SQS Queues](https://console.aws.amazon.com/sqs/v2/home?region=${{ env.AWS_REGION }})
+          - [DynamoDB Tables](https://console.aws.amazon.com/dynamodbv2/home?region=${{ env.AWS_REGION }}#tables)
+          EOF
