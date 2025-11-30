@@ -153,12 +153,10 @@ jobs:
         run: |
           echo "Updating Lambda function code..."
           
-          # Download from S3 and update
-          aws s3 cp "s3://${{ env.s3_bucket }}/lambda-package.zip" /tmp/lambda-package.zip
-          
+          # Update Lambda function with the local zip file
           aws lambda update-function-code \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
-            --zip-file fileb:///tmp/lambda-package.zip \
+            --zip-file fileb://lambda-package.zip \
             --region ${{ env.AWS_REGION }}
           
           # Wait for update to complete
