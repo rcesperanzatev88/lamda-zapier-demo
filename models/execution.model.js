@@ -110,7 +110,8 @@ class ExecutionModel {
         };
 
         if(result_data){
-            update_params.UpdateExpression += ', result = :result';
+            update_params.UpdateExpression += ', #result = :result';
+            update_params.ExpressionAttributeNames['#result'] = 'result';
             update_params.ExpressionAttributeValues[':result'] = result_data;
         }
 
