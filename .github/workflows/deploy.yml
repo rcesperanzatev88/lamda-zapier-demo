@@ -79,6 +79,8 @@ jobs:
 
       - name: Deploy CloudFormation Stack
         run: |
+          echo "Deploying CloudFormation stack..."
+          
           # Check if stack exists
           if aws cloudformation describe-stacks --stack-name ${{ env.STACK_NAME }} --region ${{ env.AWS_REGION }} 2>&1 | grep -q 'does not exist'; then
             echo "Creating new stack..."
@@ -96,7 +98,8 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --parameters \
               ParameterKey=LambdaFunctionName,ParameterValue=${{ env.LAMBDA_FUNCTION_NAME }} \
-            || true
+              ParameterKey=ApiName,ParameterValue=Pokemon-Unified-API \
+            || echo "Stack operation may already be in progress"
           
           echo "✅ Stack deployment initiated"
 
