@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda Zapier Demo - SQS-based serverless message processing system'
+
+Parameters:
+  LambdaFunctionName:
+    Type: String
+    Default: sqs-unified-handler
+    Description: Name of the Lambda function
+
+  ApiName:
+    Type: String
+    Default: Pokemon-Unified-API
+    Description: Name of the API Gateway
+
+Resources:
+  # Dead Letter Queue
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: message-processing-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  # Main SQS Queue
+  MainQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: message-processing-queue
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600  # 4 days
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  # DynamoDB Executions Table
+  ExecutionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: sqs-executions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # DynamoDB Logs Table
+  LogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: sqs-logs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SQSProcessingLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-09'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+  # Lambda Function
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            return {
+              statusCode: 200,
+              body: JSON.stringify({ message: 'Placeholder - Deploy your code' })
+            };
+          };
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref MainQueue
+          DLQ_URL: !Ref DeadLetterQueue
+          EXECUTIONS_TABLE: !Ref ExecutionsTable
+          LOGS_TABLE: !Ref LogsTable
+
+  # SQS Event Source Mapping
+  LambdaSQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt MainQueue.Arn
+      FunctionName: !Ref LambdaFunction
+      BatchSize: 10
+      Enabled: true
+
+  # API Gateway REST API
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Ref ApiName
+      Description: Unified Pokemon API with producer/consumer/replay endpoints
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # API Gateway Resources
+  ProducerResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: producer
+
+  ConsumerResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: consumer
+
+  ReplayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: replay
+
+  # Producer POST Method
+  ProducerMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ProducerResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations
+
+  # Consumer POST Method
+  ConsumerMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ConsumerResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations
+
+  # Replay POST Method
+  ReplayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ReplayResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations
+
+  # Lambda Permission for API Gateway
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*
+
+  # API Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ProducerMethod
+      - ConsumerMethod
+      - ReplayMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+
+  # API Stage
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: prod
+      RestApiId: !Ref ApiGateway
+      DeploymentId: !Ref ApiDeployment
+
+Outputs:
+  MainQueueUrl:
+    Description: URL of the main SQS queue
+    Value: !Ref MainQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-MainQueueUrl
+
+  DLQUrl:
+    Description: URL of the Dead Letter Queue
+    Value: !Ref DeadLetterQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-DLQUrl
+
+  ExecutionsTableName:
+    Description: Name of the Executions DynamoDB table
+    Value: !Ref ExecutionsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-ExecutionsTable
+
+  LogsTableName:
+    Description: Name of the Logs DynamoDB table
+    Value: !Ref LogsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-LogsTable
+
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt LambdaFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-LambdaArn
+
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiEndpoint
+
+  ProducerUrl:
+    Description: Producer endpoint URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/producer
+
+  ConsumerUrl:
+    Description: Consumer endpoint URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/consumer
+
+  ReplayUrl:
+    Description: Replay endpoint URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/replay
