@@ -6,7 +6,7 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
 
-const dynamodb_client = new DynamoDBClient({ region: process.env.REGION || 'ap-southeast-1' });
+const dynamodb_client = new DynamoDBClient({ region: process.env.AWS_REGION || 'ap-southeast-1' });
 const ddb = DynamoDBDocumentClient.from(dynamodb_client);
 
 const LOGS_TABLE = process.env.LOGS_TABLE || 'sqs-logs';

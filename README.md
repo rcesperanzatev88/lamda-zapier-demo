@@ -1,6 +1,4 @@
-# Unified Lambda Handler - MVC Architecture
-
-This is a refactored version of the unified Lambda handler using MVC (Model-View-Controller) architecture pattern.
+# Unified Lambda Handler - Zapier like Architecture
 
 ## 📁 Project Structure
 
@@ -26,8 +24,8 @@ unified/
 
 ### **Models** (`models/`)
 Data layer - handles all database and queue operations
-- `execution.model.js` - DynamoDB execution records (create, get, update)
-- `log.model.js` - DynamoDB log entries (write)
+- `execution.model.js` - DynamoDB execution records (create, get, update with reserved keyword handling)
+- `log.model.js` - DynamoDB log entries with 90-day TTL (write)
 - `queue.model.js` - SQS operations (send, fetch, delete)
 
 ### **Services** (`services/`)
@@ -64,16 +62,22 @@ cd ..
 Queue new Pokemon API requests
 
 ```bash
-curl -X POST https://xxx.execute-api.us-east-1.amazonaws.com/prod/producer \
+curl -X POST https://xxx.execute-api.ap-southeast-1.amazonaws.com/prod/producer \
   -H 'Content-Type: application/json' \
   -d '{"action": "get-pokemon", "pokemon": "pikachu"}'
 ```
+
+**Request Options:**
+- `get-pokemon`: `{"action": "get-pokemon", "pokemon": "pikachu"}`
+- `get-ability`: `{"action": "get-ability", "ability": "overgrow"}`
+- `list-pokemon`: `{"action": "list-pokemon", "limit": 20, "offset": 0}`
+- `get-status`: `{"action": "get-status", "execution_id": "exec_xxx"}`
 
 ### POST /consumer
 Manually process specific execution
 
 ```bash
-curl -X POST https://xxx.execute-api.us-east-1.amazonaws.com/prod/consumer \
+curl -X POST https://xxx.execute-api.ap-southeast-1.amazonaws.com/prod/consumer \
   -H 'Content-Type: application/json' \
   -d '{"execution_id": "exec_xxx"}'
 ```
@@ -82,41 +86,280 @@ curl -X POST https://xxx.execute-api.us-east-1.amazonaws.com/prod/consumer \
 Replay failed executions from DLQ
 
 ```bash
-curl -X POST https://xxx.execute-api.us-east-1.amazonaws.com/prod/replay \
+curl -X POST https://xxx.execute-api.ap-southeast-1.amazonaws.com/prod/replay \
   -H 'Content-Type: application/json' \
   -d '{"execution_ids": ["exec_xxx", "exec_yyy"]}'
 ```
 
+**Or replay all DLQ messages:**
+```bash
+curl -X POST https://xxx.execute-api.ap-southeast-1.amazonaws.com/prod/replay \
+  -H 'Content-Type: application/json' \
+  -d '{"replay_all": true}'
+```
+
+## 🔄 Data Flow Diagrams
+
+### 📤 Producer Flow (Queue Messages)
+```
+┌──────────┐
+│  Client  │
+└────┬─────┘
+     │ POST /producer
+     │ {"action": "get-pokemon", "pokemon": "pikachu"}
+     ▼
+┌─────────────────────┐
+│   API Gateway       │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│  Lambda Handler     │
+│  (index.js)         │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│  Routes             │
+│  /producer          │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────────────┐
+│  ProducerController         │
+│  1. Validate action         │
+│  2. Generate execution_id   │
+└─────────┬───────────────────┘
+          │
+          ├──────────────────────┐
+          │                      │
+          ▼                      ▼
+┌──────────────────┐   ┌─────────────────┐
+│ ExecutionModel   │   │  QueueModel     │
+│ createExecution()│   │  sendToQueue()  │
+└────────┬─────────┘   └────────┬────────┘
+         │                      │
+         ▼                      ▼
+┌──────────────────┐   ┌─────────────────┐
+│  DynamoDB        │   │   SQS Queue     │
+│  sqs-executions  │   │   (Main)        │
+│  Status: queued  │   │   Message       │
+└──────────────────┘   └─────────────────┘
+         │
+         └──────────────┐
+                        │
+                        ▼
+                  ┌──────────┐
+                  │  Client  │
+                  │ Response │
+                  │ {exec_id}│
+                  └──────────┘
+```
+
+### 📥 Consumer Flow (Process Messages)
+```
+┌─────────────────┐
+│   SQS Queue     │
+│   (Main)        │
+└────────┬────────┘
+         │ SQS Trigger (automatic)
+         │ Max 10 messages/batch
+         ▼
+┌─────────────────────┐
+│  Lambda Handler     │
+│  (index.js)         │
+└─────────┬───────────┘
+          │ Detect SQS event
+          ▼
+┌─────────────────────────────────┐
+│  ConsumerController             │
+│  processMessage()               │
+│  1. Update status: processing   │
+└─────────┬───────────────────────┘
+          │
+          ├─────────────┬──────────────┐
+          │             │              │
+          ▼             ▼              ▼
+┌──────────────┐ ┌─────────────┐ ┌──────────┐
+│ExecutionModel│ │  LogModel   │ │Pokemon   │
+│updateStatus()│ │  writeLog() │ │Service   │
+└──────┬───────┘ └──────┬──────┘ └────┬─────┘
+       │                │              │
+       ▼                ▼              ▼
+┌──────────────┐ ┌─────────────┐ ┌──────────────┐
+│  DynamoDB    │ │  DynamoDB   │ │  PokeAPI     │
+│  executions  │ │  logs       │ │  External    │
+│ processing   │ │  info       │ │  https://... │
+└──────────────┘ └─────────────┘ └──────┬───────┘
+                                        │
+                                        │ API Response
+                                        ▼
+                        ┌──────────────────────────┐
+                        │  ConsumerController      │
+                        │  2. Update: completed    │
+                        └──────────┬───────────────┘
+                                   │
+                                   ├──────────┐
+                                   │          │
+                                   ▼          ▼
+                        ┌──────────────┐ ┌─────────────┐
+                        │ExecutionModel│ │  LogModel   │
+                        │updateStatus()│ │  writeLog() │
+                        │+ result data │ │  success    │
+                        └──────┬───────┘ └─────────────┘
+                               │
+                               ▼
+                        ┌──────────────┐
+                        │  DynamoDB    │
+                        │  executions  │
+                        │  completed   │
+                        │  + result    │
+                        └──────────────┘
+```
+
+### ⚠️ Error & Retry Flow
+```
+┌─────────────────────┐
+│  Consumer Fails     │
+│  (API error, etc.)  │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────────────┐
+│  Error Handler              │
+│  retry_count < 3?           │
+└─────────┬───────────────────┘
+          │
+    ┌─────┴─────┐
+    │           │
+    ▼ YES       ▼ NO
+┌─────────┐  ┌──────────────┐
+│ Retry   │  │  Move to DLQ │
+│ Message │  │  Status:     │
+│ Backoff │  │  failed      │
+└────┬────┘  └──────┬───────┘
+     │              │
+     ▼              ▼
+┌─────────┐  ┌──────────────┐
+│SQS Queue│  │   SQS DLQ    │
+│ (Main)  │  │ (Dead Letter)│
+└─────────┘  └──────────────┘
+```
+
+### 🔄 Replay Flow (Recover Failed Messages)
+```
+┌──────────┐
+│  Client  │
+└────┬─────┘
+     │ POST /replay
+     │ {"replay_all": true}
+     ▼
+┌─────────────────────┐
+│  ReplayController   │
+│  1. Fetch DLQ msgs  │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│   QueueModel        │
+│   fetchFromDLQ()    │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│   SQS DLQ           │
+│   Read messages     │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────────────┐
+│  ReplayController           │
+│  2. Reset execution status  │
+│  3. Send back to queue      │
+└─────────┬───────────────────┘
+          │
+          ├──────────────┬──────────────┐
+          │              │              │
+          ▼              ▼              ▼
+┌──────────────┐  ┌──────────┐  ┌──────────────┐
+│ExecutionModel│  │QueueModel│  │   LogModel   │
+│updateStatus()│  │sendQueue │  │   writeLog() │
+│ queued       │  │          │  │   replay     │
+└──────────────┘  └────┬─────┘  └──────────────┘
+                       │
+                       ▼
+                ┌──────────────┐
+                │  SQS Queue   │
+                │  (Main)      │
+                │  Re-queued!  │
+                └──────┬───────┘
+                       │
+                       ▼
+                ┌──────────────┐
+                │  Consumer    │
+                │  Retry       │
+                └──────────────┘
+```
+
+### 📊 Complete System Overview
+```
+                    ┌──────────────────────────────────────────┐
+                    │         Client Application               │
+                    └──────┬────────────────────┬──────────────┘
+                           │                    │
+                    POST /producer      POST /replay
+                           │                    │
+                           ▼                    ▼
+                    ┌──────────────────────────────────────────┐
+                    │         API Gateway (REST API)           │
+                    └──────┬────────────────────┬──────────────┘
+                           │                    │
+                           ▼                    ▼
+                    ┌────────────────────────────────────────────┐
+                    │      Lambda Function (Unified Handler)     │
+                    │  ┌──────────────────────────────────────┐  │
+                    │  │  Routes → Controllers → Models       │  │
+                    │  └──────────────────────────────────────┘  │
+                    └──┬──────────┬──────────┬─────────┬────────┘
+                       │          │          │         │
+            ┌──────────┘          │          │         └────────────┐
+            │                     │          │                      │
+            ▼                     ▼          ▼                      ▼
+    ┌──────────────┐      ┌──────────────────────┐         ┌─────────────┐
+    │  SQS Queue   │◄─────│   DynamoDB Tables    │         │  PokeAPI    │
+    │   (Main)     │      │  - sqs-executions    │         │  External   │
+    └──────┬───────┘      │  - sqs-logs (TTL=90d)│         └─────────────┘
+           │              └──────────────────────┘
+           │ SQS Trigger
+           │ (auto)
+           ▼
+    ┌──────────────┐
+    │   Lambda     │
+    │  (Consumer)  │
+    └──────┬───────┘
+           │
+      ┌────┴────┐
+      │         │
+   Success    Fail (3x)
+      │         │
+      ▼         ▼
+    [Done]  ┌──────────┐
+            │ SQS DLQ  │
+            └──────────┘
+```
+
 ## 🔄 How It Works
 
-1. **Producer Flow**:
-   - Client sends request to `/producer`
-   - `producer.controller` validates action
-   - `execution.model` creates DB record
-   - `queue.model` sends message to SQS
-   - Returns `execution_id` to client
-
-2. **Consumer Flow (Automatic)**:
-   - SQS triggers Lambda with message
-   - `consumer.controller` processes message
-   - `pokemon.service` calls external API
-   - `execution.model` updates status
-   - `log.model` writes processing logs
-
-3. **Replay Flow**:
-   - Client sends request to `/replay`
-   - `replay.controller` fetches DLQ messages
-   - `execution.model` resets execution status
-   - `queue.model` sends back to main queue
-   - Returns replay summary
-
-## 🎯 Benefits of MVC Structure
+## 🎯 Benefits of this Structure
 
 - **Separation of Concerns**: Each layer has single responsibility
 - **Reusability**: Models and services can be reused across controllers
 - **Testability**: Easy to unit test individual components
 - **Maintainability**: Clear structure, easy to locate code
 - **Scalability**: Easy to add new routes/controllers/services
+- **Error Handling**: Proper DynamoDB reserved keyword handling (status, result)
+- **Region Consistency**: All AWS services use `AWS_REGION` environment variable
+- **Data Retention**: Automatic log cleanup with 90-day TTL
 
 ## 📝 Adding New Features
 
@@ -132,4 +375,32 @@ curl -X POST https://xxx.execute-api.us-east-1.amazonaws.com/prod/replay \
 
 ### Add New Data Model
 1. Create model in `models/`
-2. Import in controllers as needed
+2. Use `ExpressionAttributeNames` for reserved keywords
+3. Import in controllers as needed
+
+## ⚙️ Environment Variables
+
+```bash
+AWS_REGION=ap-southeast-1
+QUEUE_URL=https://sqs.ap-southeast-1.amazonaws.com/xxx/sqs-queue
+DLQ_URL=https://sqs.ap-southeast-1.amazonaws.com/xxx/sqs-dlq
+EXECUTIONS_TABLE=sqs-executions
+LOGS_TABLE=sqs-logs
+```
+
+## 🐛 Common Issues & Fixes
+
+### ResourceNotFoundException
+- **Cause**: DynamoDB table doesn't exist in the region
+- **Fix**: Ensure `AWS_REGION` environment variable is set (not `REGION`)
+- **Fixed in**: `log.model.js`, `execution.model.js`, `queue.model.js`
+
+### ValidationException: Reserved Keyword
+- **Cause**: Using DynamoDB reserved words (`result`, `status`, `data`, etc.)
+- **Fix**: Use `ExpressionAttributeNames` to alias reserved keywords
+- **Fixed in**: `execution.model.js` - `#result` and `#status` aliases
+
+### Retry Logic
+- **Max Retries**: 3 attempts with exponential backoff
+- **DLQ**: Failed messages after max retries go to Dead Letter Queue
+- **Replay**: Use `/replay` endpoint to retry failed executions
