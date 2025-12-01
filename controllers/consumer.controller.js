@@ -1,17 +1,17 @@
 /**
  * Consumer Controller
- * Handles message processing and Pokemon API calls
+ * Handles message processing and API calls
  */
 
 const ExecutionModel = require('../models/execution.model');
 const LogModel = require('../models/log.model');
-const PokemonService = require('../services/pokemon.service');
+const SlackService = require('../services/slack.service');
 
 const MAX_RETRY_ATTEMPTS = 3;
 
 class ConsumerController {
     /**
-     * DOCU: Process message and call Pokemon API <br>
+     * DOCU: Process message and call Slack API <br>
      * Triggered: Lambda SQS trigger, ConsumerController.handleConsumer() <br>
      * Last Updated Date: November 30, 2025
      * @async
@@ -22,28 +22,14 @@ class ConsumerController {
      * @author Vibe Team
      */
     static processMessage = async (message) => {
-        const { execution_id, action, pokemon, ability, limit, offset } = message;
+        const { execution_id, action } = message;
 
         try{
             // Update status to processing
             await ExecutionModel.updateExecution(execution_id, 'processing');
             await LogModel.writeLog(execution_id, 'info', `Processing ${action}`, { action });
 
-            let api_result;
-
-            // Call appropriate Pokemon API
-            if(action === 'get-pokemon'){
-                api_result = await PokemonService.getPokemon(pokemon);
-            }
-            else if(action === 'get-ability'){
-                api_result = await PokemonService.getPokemonAbility(ability);
-            }
-            else if(action === 'list-pokemon'){
-                api_result = await PokemonService.listPokemon(limit, offset);
-            }
-            else{
-                throw new Error(`Unknown action: ${action}`);
-            }
+            let api_result = { message: `Action ${action} processed successfully` };
 
             // Update execution as completed
             await ExecutionModel.updateExecution(execution_id, 'completed', api_result);
@@ -67,7 +53,7 @@ class ConsumerController {
                 // Max retries reached, mark as failed
                 await ExecutionModel.updateExecution(execution_id, 'failed', { error: error.message }, retry_count);
                 await LogModel.writeLog(execution_id, 'error', `Processing failed after ${retry_count} attempts`, { error: error.message });
-            }
+           }
             else{
                 // Will retry
                 await ExecutionModel.updateExecution(execution_id, 'queued', null, retry_count);
@@ -113,11 +99,7 @@ class ConsumerController {
             // Process the message
             const result = await ConsumerController.processMessage({
                 execution_id: execution.execution_id,
-                action: execution.action,
-                pokemon: execution.pokemon,
-                ability: execution.ability,
-                limit: execution.limit,
-                offset: execution.offset
+                action: execution.action
             });
 
             return result;

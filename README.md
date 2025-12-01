@@ -1,4 +1,4 @@
-# Unified Lambda Handler - Zapier like Architecture
+# Unified Lambda Handler - Slack Integration with Zapier-like Architecture
 
 ## 📁 Project Structure
 
@@ -17,7 +17,7 @@ unified/
 │   ├── log.model.js                  # Log DB operations
 │   └── queue.model.js                # SQS operations
 └── services/
-    └── pokemon.service.js            # External Pokemon API calls
+    └── slack.service.js              # Slack webhook integrations
 ```
 
 ## 🏗️ Architecture Layers
@@ -30,12 +30,12 @@ Data layer - handles all database and queue operations
 
 ### **Services** (`services/`)
 Business logic layer - external API integrations
-- `pokemon.service.js` - Pokemon API calls (getPokemon, getPokemonAbility, listPokemon)
+- `slack.service.js` - Slack webhook calls (sendMessage, sendFormattedMessage)
 
 ### **Controllers** (`controllers/`)
 Application logic layer - orchestrates models and services
-- `producer.controller.js` - Validates requests, creates executions, queues messages
-- `consumer.controller.js` - Processes messages, calls Pokemon API, handles retries
+- `producer.controller.js` - Validates requests, sends Slack messages, checks status
+- `consumer.controller.js` - Processes queued messages, handles retries
 - `replay.controller.js` - Replays failed messages from DLQ
 
 ### **Routes** (`routes/`)
@@ -59,18 +59,17 @@ cd ..
 ## 📡 API Endpoints
 
 ### POST /producer
-Queue new Pokemon API requests
+Send Slack messages and check execution status
 
 ```bash
 curl -X POST https://xxx.execute-api.ap-southeast-1.amazonaws.com/prod/producer \
   -H 'Content-Type: application/json' \
-  -d '{"action": "get-pokemon", "pokemon": "pikachu"}'
+  -d '{"action": "send-slack-message", "message": "Hello, World!"}'
 ```
 
 **Request Options:**
-- `get-pokemon`: `{"action": "get-pokemon", "pokemon": "pikachu"}`
-- `get-ability`: `{"action": "get-ability", "ability": "overgrow"}`
-- `list-pokemon`: `{"action": "list-pokemon", "limit": 20, "offset": 0}`
+- `send-slack-message`: `{"action": "send-slack-message", "message": "Hello, World!"}`
+- `send-slack-formatted`: `{"action": "send-slack-formatted", "payload": {"text": "Hello!"}}`
 - `get-status`: `{"action": "get-status", "execution_id": "exec_xxx"}`
 
 ### POST /consumer
@@ -106,7 +105,7 @@ curl -X POST https://xxx.execute-api.ap-southeast-1.amazonaws.com/prod/replay \
 │  Client  │
 └────┬─────┘
      │ POST /producer
-     │ {"action": "get-pokemon", "pokemon": "pikachu"}
+     │ {"action": "send-slack-message", "message": "Hello!"}
      ▼
 ┌─────────────────────┐
 │   API Gateway       │
@@ -181,13 +180,13 @@ curl -X POST https://xxx.execute-api.ap-southeast-1.amazonaws.com/prod/replay \
           │             │              │
           ▼             ▼              ▼
 ┌──────────────┐ ┌─────────────┐ ┌──────────┐
-│ExecutionModel│ │  LogModel   │ │Pokemon   │
-│updateStatus()│ │  writeLog() │ │Service   │
+│ExecutionModel│ │  LogModel   │ │  Slack   │
+│updateStatus()│ │  writeLog() │ │ Service  │
 └──────┬───────┘ └──────┬──────┘ └────┬─────┘
        │                │              │
        ▼                ▼              ▼
 ┌──────────────┐ ┌─────────────┐ ┌──────────────┐
-│  DynamoDB    │ │  DynamoDB   │ │  PokeAPI     │
+│  DynamoDB    │ │  DynamoDB   │ │Slack Webhook │
 │  executions  │ │  logs       │ │  External    │
 │ processing   │ │  info       │ │  https://... │
 └──────────────┘ └─────────────┘ └──────┬───────┘
@@ -326,8 +325,8 @@ curl -X POST https://xxx.execute-api.ap-southeast-1.amazonaws.com/prod/replay \
             │                     │          │                      │
             ▼                     ▼          ▼                      ▼
     ┌──────────────┐      ┌──────────────────────┐         ┌─────────────┐
-    │  SQS Queue   │◄─────│   DynamoDB Tables    │         │  PokeAPI    │
-    │   (Main)     │      │  - sqs-executions    │         │  External   │
+    │  SQS Queue   │◄─────│   DynamoDB Tables    │         │   Slack     │
+    │   (Main)     │      │  - sqs-executions    │         │  Webhooks   │
     └──────┬───────┘      │  - sqs-logs (TTL=90d)│         └─────────────┘
            │              └──────────────────────┘
            │ SQS Trigger

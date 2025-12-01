@@ -3,14 +3,13 @@ name: Deploy with CloudFormation
 on:
   push:
     branches:
-      - main
-      - master
+      - idl
   workflow_dispatch:
 
 env:
   AWS_REGION: ap-southeast-1
-  STACK_NAME: lambda-zapier-demo-stack
-  LAMBDA_FUNCTION_NAME: sqs-unified-handler
+  STACK_NAME: lambda-zapier-demo-stack-idl
+  LAMBDA_FUNCTION_NAME: sqs-unified-handler-idl
 
 jobs:
   deploy:
@@ -108,7 +107,7 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --parameters \
               ParameterKey=LambdaFunctionName,ParameterValue=${{ env.LAMBDA_FUNCTION_NAME }} \
-              ParameterKey=ApiName,ParameterValue=Pokemon-Unified-API \
+              ParameterKey=ApiName,ParameterValue=Slack-Unified-API-idl \
             || echo "Stack operation may already be in progress"
           
           echo "✅ Stack deployment initiated"
@@ -213,7 +212,7 @@ jobs:
           echo "🧪 Test Command:"
           echo "curl -X POST $PRODUCER_URL \\"
           echo "  -H 'Content-Type: application/json' \\"
-          echo "  -d '{\"action\": \"get-pokemon\", \"pokemon\": \"pikachu\"}'"
+          echo "  -d '{\"action\": \"send-slack-message\", \"message\": \"Hello from IDL!\"}'"
           echo ""
           echo "=========================================="
 
@@ -231,10 +230,15 @@ jobs:
           ## 🧪 Test Commands
           
           \`\`\`bash
-          # Queue a Pokemon request
+          # Send Slack message
           curl -X POST ${{ steps.outputs.outputs.producer_url }} \\
             -H 'Content-Type: application/json' \\
-            -d '{"action": "get-pokemon", "pokemon": "pikachu"}'
+            -d '{"action": "send-slack-message", "message": "Hello from IDL!"}'
+          
+          # Send formatted Slack message
+          curl -X POST ${{ steps.outputs.outputs.producer_url }} \\
+            -H 'Content-Type: application/json' \\
+            -d '{"action": "send-slack-formatted", "payload": {"text": "Hello!"}}'
           
           # Check execution status
           curl -X POST ${{ steps.outputs.outputs.producer_url }} \\

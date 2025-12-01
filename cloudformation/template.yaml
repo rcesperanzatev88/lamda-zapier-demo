@@ -4,12 +4,12 @@ Description: 'Lambda Zapier Demo - SQS-based serverless message processing syste
 Parameters:
   LambdaFunctionName:
     Type: String
-    Default: sqs-unified-handler
+    Default: sqs-unified-handler-idl
     Description: Name of the Lambda function
 
   ApiName:
     Type: String
-    Default: Pokemon-Unified-API
+    Default: Slack-Unified-API-idl
     Description: Name of the API Gateway
 
 Resources:
@@ -17,14 +17,14 @@ Resources:
   DeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: message-processing-dlq
+      QueueName: message-processing-dlq-idl
       MessageRetentionPeriod: 1209600  # 14 days
 
   # Main SQS Queue
   MainQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: message-processing-queue
+      QueueName: message-processing-queue-idl
       VisibilityTimeout: 60
       MessageRetentionPeriod: 345600  # 4 days
       RedrivePolicy:
@@ -35,7 +35,7 @@ Resources:
   ExecutionsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: sqs-executions
+      TableName: sqs-executions-idl
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: PK
@@ -65,7 +65,7 @@ Resources:
   LogsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: sqs-logs
+      TableName: sqs-logs-idl
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: PK
@@ -85,7 +85,7 @@ Resources:
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: SQSProcessingLambdaRole
+      RoleName: SQSProcessingLambdaRole-idl
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -137,7 +137,7 @@ Resources:
     Type: AWS::ApiGateway::RestApi
     Properties:
       Name: !Ref ApiName
-      Description: Unified Pokemon API with producer/consumer/replay endpoints
+      Description: Unified Slack API with producer/consumer/replay endpoints
       EndpointConfiguration:
         Types:
           - REGIONAL

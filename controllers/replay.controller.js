@@ -33,12 +33,8 @@ class ReplayController {
             }
 
             // Prepare message payload
-            const payload = {
-                action: execution.action,
-                pokemon: execution.pokemon,
-                ability: execution.ability,
-                limit: execution.limit,
-                offset: execution.offset
+            const payload = execution.payload || {
+                action: execution.action
             };
 
             // Send back to main queue

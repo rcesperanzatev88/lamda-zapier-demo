@@ -7,8 +7,9 @@ const { v4: uuidv4 } = require('uuid');
 const ExecutionModel = require('../models/execution.model');
 const QueueModel = require('../models/queue.model');
 const LogModel = require('../models/log.model');
+const SlackService = require('../services/slack.service');
 
-const VALID_ACTIONS = ['get-pokemon', 'get-ability', 'list-pokemon', 'get-status'];
+const VALID_ACTIONS = ['get-status', 'send-slack-message', 'send-slack-formatted'];
 
 class ProducerController {
     /**
@@ -31,16 +32,16 @@ class ProducerController {
         }
 
         // Validate action-specific fields
-        if(payload.action === 'get-pokemon' && !payload.pokemon){
-            return { valid: false, error: 'Missing required field: pokemon (for get-pokemon action)' };
-        }
-
-        if(payload.action === 'get-ability' && !payload.ability){
-            return { valid: false, error: 'Missing required field: ability (for get-ability action)' };
-        }
-
         if(payload.action === 'get-status' && !payload.execution_id){
             return { valid: false, error: 'Missing required field: execution_id (for get-status action)' };
+        }
+
+        if(payload.action === 'send-slack-message' && !payload.message){
+            return { valid: false, error: 'Missing required field: message (for send-slack-message action)' };
+        }
+
+        if(payload.action === 'send-slack-formatted' && !payload.payload){
+            return { valid: false, error: 'Missing required field: payload (for send-slack-formatted action)' };
         }
 
         return { valid: true, error: null };
@@ -119,7 +120,7 @@ class ProducerController {
     /**
      * DOCU: Main producer handler - validates and routes requests <br>
      * Triggered: Routes.routeRequest() <br>
-     * Last Updated Date: November 30, 2025
+     * Last Updated Date: December 1, 2025
      * @async
      * @function
      * @memberOf ProducerController
@@ -142,6 +143,25 @@ class ProducerController {
             // Handle get-status separately
             if(body.action === 'get-status'){
                 return await ProducerController.getExecutionStatus(body.execution_id);
+            }
+
+            // Handle Slack messages directly (no queuing)
+            if(body.action === 'send-slack-message'){
+                const result = await SlackService.sendMessage(body.message, body.webhookUrl || null);
+                return {
+                    status: true,
+                    result: result,
+                    error: null
+                };
+            }
+
+            if(body.action === 'send-slack-formatted'){
+                const result = await SlackService.sendFormattedMessage(body.payload, body.webhookUrl || null);
+                return {
+                    status: true,
+                    result: result,
+                    error: null
+                };
             }
 
             // Create and queue new execution
