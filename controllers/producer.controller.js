@@ -146,22 +146,42 @@ class ProducerController {
             }
 
             // Handle Slack messages directly (no queuing)
-            if(body.action === 'send-slack-message'){
-                const result = await SlackService.sendMessage(body.message, body.webhookUrl || null);
-                return {
-                    status: true,
-                    result: result,
-                    error: null
-                };
-            }
+            if(body.action === 'send-slack-message' || body.action === 'send-slack-formatted'){
+                const execution_id = `slack_${uuidv4()}`;
+                
+                try {
+                    // Create execution record
+                    await ExecutionModel.createExecution(execution_id, body);
+                    await LogModel.writeLog(execution_id, 'info', 'Sending Slack message', { action: body.action });
+                    
+                    // Update to processing
+                    await ExecutionModel.updateExecution(execution_id, 'processing');
 
-            if(body.action === 'send-slack-formatted'){
-                const result = await SlackService.sendFormattedMessage(body.payload, body.webhookUrl || null);
-                return {
-                    status: true,
-                    result: result,
-                    error: null
-                };
+                    let result;
+                    if (body.action === 'send-slack-message') {
+                        result = await SlackService.sendMessage(body.message, body.webhookUrl || null);
+                    } else {
+                        result = await SlackService.sendFormattedMessage(body.payload, body.webhookUrl || null);
+                    }
+
+                    // Update as completed
+                    await ExecutionModel.updateExecution(execution_id, 'completed', result);
+                    await LogModel.writeLog(execution_id, 'info', 'Slack message sent successfully', { result });
+
+                    return {
+                        status: true,
+                        result: {
+                            execution_id: execution_id,
+                            message: 'Slack message sent successfully',
+                            data: result
+                        },
+                        error: null
+                    };
+                } catch (error) {
+                    await ExecutionModel.updateExecution(execution_id, 'failed', { error: error.message });
+                    await LogModel.writeLog(execution_id, 'error', 'Slack message failed', { error: error.message });
+                    throw error;
+                }
             }
 
             // Create and queue new execution
